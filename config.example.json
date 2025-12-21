@@ -1,0 +1,42 @@
+{
+  "source": {
+    "name": "old-nas",
+    "address": "192.168.0.100",
+    "basePath": "/var/mnt/old-nas",
+    "credentialsFile": "~/.smbcredentials-old-nas",
+    "mountOptions": "vers=2.0"
+  },
+  "destination": {
+    "name": "new-nas",
+    "address": "192.168.0.200",
+    "basePath": "/var/mnt/new-nas",
+    "credentialsFile": "~/.smbcredentials-new-nas",
+    "mountOptions": "",
+    "extraShares": [
+      "isos",
+      "backups"
+    ]
+  },
+  "logDir": "~/nas-migrate-logs",
+  "progressFile": "~/.nas-migrate-progress",
+  "directories": [
+    {
+      "source": "documents",
+      "destination": "documents",
+      "shareNameSource": "Documents",
+      "shareNameDest": "documents"
+    },
+    {
+      "source": "photos",
+      "destination": "photos",
+      "shareNameSource": "Photos",
+      "shareNameDest": "photos"
+    },
+    {
+      "source": "old-name",
+      "destination": "new-name",
+      "shareNameSource": "OldName",
+      "shareNameDest": "new-name"
+    }
+  ]
+}

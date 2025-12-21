@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Config with real credentials
+config.json
+
+# Credential files (even examples with real passwords)
+.smbcredentials*
+!.smbcredentials-example
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Environment variables
+.env
+.env.*
+!.env.example
