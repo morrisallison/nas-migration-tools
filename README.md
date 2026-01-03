@@ -40,23 +40,38 @@ Edit `config.json` with your NAS details:
   "source": {
     "name": "old-nas",
     "address": "192.168.0.100",
-    "basePath": "/var/mnt/old-nas",
+    "baseMountPath": "/var/mnt/old-nas",
     "credentialsFile": "~/.smbcredentials-old-nas",
-    "mountOptions": "vers=2.0"
+    "mountOptions": "vers=2.0",
+    "shares": [
+      { "name": "Photos", "mountAs": "photos" },
+      { "name": "Documents", "mountAs": "documents" }
+    ]
   },
   "destination": {
     "name": "new-nas",
     "address": "192.168.0.200",
-    "basePath": "/var/mnt/new-nas",
+    "baseMountPath": "/var/mnt/new-nas",
     "credentialsFile": "~/.smbcredentials-new-nas",
-    "mountOptions": ""
+    "mountOptions": "",
+    "shares": [
+      { "name": "photos", "mountAs": "photos" },
+      { "name": "documents", "mountAs": "documents" }
+    ]
   },
+  "logDirectory": "~/nas-migrate-logs",
   "directories": [
     {
-      "source": "photos",
-      "destination": "photos",
-      "shareNameSource": "Photos",
-      "shareNameDest": "photos"
+      "source": "/var/mnt/old-nas/photos",
+      "destination": "/var/mnt/new-nas/photos"
+    },
+    {
+      "source": "/var/mnt/old-nas/documents",
+      "destination": "/var/mnt/new-nas/documents"
+    },
+    {
+      "source": "/home/user/local-photos",
+      "destination": "/var/mnt/new-nas/photos/local-imports"
     }
   ]
 }
@@ -159,27 +174,41 @@ chmod 600 ~/.smbcredentials-*
 |-------|-------------|
 | `source.name` | Friendly name for source NAS |
 | `source.address` | IP or hostname |
-| `source.basePath` | Local mount point base path |
+| `source.baseMountPath` | Local mount point base path |
 | `source.credentialsFile` | Path to SMB credentials file |
 | `source.mountOptions` | Additional mount options (e.g., `vers=2.0`) |
+| `source.shares` | Array of shares to mount (see below) |
 | `destination.*` | Same fields for destination NAS |
-| `destination.extraShares` | Additional shares to mount (not migrated) |
-| `logDir` | Directory for log files |
-| `progressFile` | File to track migration progress |
-| `directories` | Array of directory mappings |
+| `logDirectory` | Directory for log files |
+| `directories` | Array of directory mappings (see below) |
 
-### Directory Mapping
+### Share Configuration
 
-Each entry in `directories` maps a source share to a destination:
+Each entry in `source.shares` or `destination.shares` defines an SMB share to mount:
 
 ```json
 {
-  "source": "old-photos",        // Source directory name
-  "destination": "photos",        // Destination directory name
-  "shareNameSource": "OldPhotos", // SMB share name on source
-  "shareNameDest": "photos"       // SMB share name on destination
+  "name": "Photos",     // SMB share name on the NAS
+  "mountAs": "photos"   // Local directory name under baseMountPath
 }
 ```
+
+### Directory Mapping
+
+Each entry in `directories` maps an absolute source path to an absolute destination:
+
+```json
+{
+  "source": "/var/mnt/old-nas/photos",
+  "destination": "/var/mnt/new-nas/photos"
+}
+```
+
+**Features:**
+- Paths can include subdirectories (e.g., `/var/mnt/new-nas/photos/local-imports`)
+- Source can be a local path (e.g., `/home/user/photos`) for uploading to NAS
+- Destination can be a local path for downloading from NAS
+- Config validation prevents accidentally swapping source/destination paths
 
 ## Logs
 

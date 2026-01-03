@@ -31,7 +31,9 @@ source "$SCRIPT_DIR/lib/migrate-common.sh"
 TIMESTAMP=$(get_timestamp)
 TARGET_LOG_FILE=""
 OUTPUT_FILE=""
-ERROR_PREFIX="rsync: \[receiver\] mkstemp \"$DEST_BASE/"
+# Error pattern for rsync mkstemp errors - matches paths in the format:
+# rsync: [receiver] mkstemp "/path/to/dest/file" failed: ...
+ERROR_PATTERN='rsync: \[receiver\] mkstemp "'
 END_OF_DIR_MARKER='/\._'
 
 # Flags
@@ -121,16 +123,18 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # Extract directory paths:
-# - Match lines with the error prefix
-# - Use sed to extract the path between prefix and /._
+# - Match lines with the error pattern
+# - Use sed to extract the path between "mkstemp \"" and the filename
 # - Sort and deduplicate
-recognized_count=$(grep -cE "$ERROR_PREFIX" "$TARGET_LOG_FILE" 2>/dev/null || echo "0")
+recognized_count=$(grep -cE "$ERROR_PATTERN" "$TARGET_LOG_FILE" 2>/dev/null || echo "0")
 
 log_info "Found $recognized_count rsync mkstemp errors"
 
 # Extract unique directories
-extracted_dirs=$(grep -E "$ERROR_PREFIX" "$TARGET_LOG_FILE" 2>/dev/null \
-    | sed -n "s|.*${ERROR_PREFIX}\(.*\)${END_OF_DIR_MARKER}.*|\1/|p" \
+# Pattern: rsync: [receiver] mkstemp "/path/to/dest/dir/._filename" failed
+# We extract /path/to/dest/dir/
+extracted_dirs=$(grep -E "$ERROR_PATTERN" "$TARGET_LOG_FILE" 2>/dev/null \
+    | sed -n 's|.*mkstemp "\([^"]*\)/\._[^"]*".*|\1/|p' \
     | sort -u)
 
 dir_count=$(echo "$extracted_dirs" | grep -c . || echo "0")

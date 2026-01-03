@@ -94,18 +94,17 @@ show_config() {
     echo ""
     
     echo -e "${BLUE}Directories to migrate:${NC}"
-    for dir in "${DIR_ORDER[@]}"; do
-        local dest="${DIR_MAP[$dir]}"
-        if [ "$dir" = "$dest" ]; then
-            echo "  • $dir"
-        else
-            echo "  • $dir → $dest"
-        fi
+    for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+        local src="${DIR_SOURCES[$i]}"
+        local dest="${DIR_DESTINATIONS[$i]}"
+        local display_name
+        display_name=$(get_dir_display_name "$src")
+        echo "  • [$i] $display_name"
+        echo "        $src → $dest"
     done
     echo ""
     
     echo -e "${BLUE}Log Directory:${NC} $LOG_DIR"
-    echo -e "${BLUE}Progress File:${NC} $PROGRESS_FILE"
     echo ""
     
     if [ "$DRY_RUN" = true ]; then

@@ -47,12 +47,6 @@ require_jq() {
 # String Utility Functions
 # =============================================================================
 
-# Convert string to kebab-case (lowercase with hyphens)
-# Usage: kebab=$(to_kebab_case "My String")
-to_kebab_case() {
-    echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/ /-/g'
-}
-
 # Expand ~ to $HOME in paths
 expand_path() {
     local path="$1"
@@ -63,12 +57,37 @@ expand_path() {
 # Configuration Loading
 # =============================================================================
 
+# Configuration variables populated by load_config()
+SOURCE_NAME=""
+SOURCE_ADDRESS=""
+SOURCE_CREDS=""
+SOURCE_BASE=""
+SOURCE_MOUNT_OPTS=""
+DEST_NAME=""
+DEST_ADDRESS=""
+DEST_CREDS=""
+DEST_BASE=""
+DEST_MOUNT_OPTS=""
+LOG_DIR=""
+
+# Arrays for shares (parallel arrays: NAME[i] corresponds to MOUNT_AS[i])
+declare -a SOURCE_SHARES_NAME=()
+declare -a SOURCE_SHARES_MOUNT_AS=()
+declare -a DEST_SHARES_NAME=()
+declare -a DEST_SHARES_MOUNT_AS=()
+
+# Arrays for directory mappings (absolute paths)
+declare -a DIR_SOURCES=()
+declare -a DIR_DESTINATIONS=()
+
+# Associative arrays for quick lookups
+declare -gA DIR_MAP        # source path -> destination path
+declare -gA REVERSE_MAP    # destination path -> source path
+
 # Load configuration from JSON file
-# Populates: SOURCE_BASE, DEST_BASE, SOURCE_NAME, DEST_NAME, LOG_DIR, 
-#            PROGRESS_FILE, DIR_ORDER, DIR_MAP, REVERSE_MAP,
-#            SOURCE_ADDRESS, DEST_ADDRESS, SOURCE_CREDS, DEST_CREDS,
-#            SHARE_NAMES_SOURCE, SHARE_NAMES_DEST,
-#            SOURCE_MOUNT_OPTS, DEST_MOUNT_OPTS, DEST_EXTRA_SHARES
+# Populates: SOURCE_BASE, DEST_BASE, SOURCE_NAME, DEST_NAME, LOG_DIR,
+#            SOURCE_SHARES_*, DEST_SHARES_*, DIR_SOURCES, DIR_DESTINATIONS,
+#            DIR_MAP, REVERSE_MAP
 load_config() {
     # Check dependencies
     require_jq
@@ -82,42 +101,100 @@ load_config() {
         exit 1
     fi
     
+    # Validate JSON syntax
+    if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${RED}[ERROR]${NC} Invalid JSON in config file: $CONFIG_FILE"
+        exit 1
+    fi
+    
     # Load source NAS config
-    SOURCE_NAME=$(jq -r '.source.name' "$CONFIG_FILE")
-    SOURCE_ADDRESS=$(jq -r '.source.address' "$CONFIG_FILE")
-    SOURCE_BASE=$(expand_path "$(jq -r '.source.basePath' "$CONFIG_FILE")")
-    SOURCE_CREDS=$(expand_path "$(jq -r '.source.credentialsFile' "$CONFIG_FILE")")
+    SOURCE_NAME=$(jq -r '.source.name // "Source NAS"' "$CONFIG_FILE")
+    SOURCE_ADDRESS=$(jq -r '.source.address // ""' "$CONFIG_FILE")
+    SOURCE_BASE=$(expand_path "$(jq -r '.source.baseMountPath // ""' "$CONFIG_FILE")")
+    SOURCE_CREDS=$(expand_path "$(jq -r '.source.credentialsFile // ""' "$CONFIG_FILE")")
     SOURCE_MOUNT_OPTS=$(jq -r '.source.mountOptions // ""' "$CONFIG_FILE")
     
     # Load destination NAS config
-    DEST_NAME=$(jq -r '.destination.name' "$CONFIG_FILE")
-    DEST_ADDRESS=$(jq -r '.destination.address' "$CONFIG_FILE")
-    DEST_BASE=$(expand_path "$(jq -r '.destination.basePath' "$CONFIG_FILE")")
-    DEST_CREDS=$(expand_path "$(jq -r '.destination.credentialsFile' "$CONFIG_FILE")")
+    DEST_NAME=$(jq -r '.destination.name // "Destination NAS"' "$CONFIG_FILE")
+    DEST_ADDRESS=$(jq -r '.destination.address // ""' "$CONFIG_FILE")
+    DEST_BASE=$(expand_path "$(jq -r '.destination.baseMountPath // ""' "$CONFIG_FILE")")
+    DEST_CREDS=$(expand_path "$(jq -r '.destination.credentialsFile // ""' "$CONFIG_FILE")")
     DEST_MOUNT_OPTS=$(jq -r '.destination.mountOptions // ""' "$CONFIG_FILE")
     
-    # Load extra shares (destination-only directories not part of migration)
-    mapfile -t DEST_EXTRA_SHARES < <(jq -r '.destination.extraShares // [] | .[]' "$CONFIG_FILE")
+    # Load log directory
+    LOG_DIR=$(expand_path "$(jq -r '.logDirectory // "~/nas-migrate-logs"' "$CONFIG_FILE")")
     
-    # Load paths
-    LOG_DIR=$(expand_path "$(jq -r '.logDir' "$CONFIG_FILE")")
-    PROGRESS_FILE=$(expand_path "$(jq -r '.progressFile' "$CONFIG_FILE")")
+    # Parse source shares
+    local share_count
+    share_count=$(jq '.source.shares // [] | length' "$CONFIG_FILE")
+    for ((i=0; i<share_count; i++)); do
+        SOURCE_SHARES_NAME+=("$(jq -r ".source.shares[$i].name" "$CONFIG_FILE")")
+        SOURCE_SHARES_MOUNT_AS+=("$(jq -r ".source.shares[$i].mountAs" "$CONFIG_FILE")")
+    done
     
-    # Load directory order (source directory names)
-    mapfile -t DIR_ORDER < <(jq -r '.directories[].source' "$CONFIG_FILE")
+    # Parse destination shares
+    share_count=$(jq '.destination.shares // [] | length' "$CONFIG_FILE")
+    for ((i=0; i<share_count; i++)); do
+        DEST_SHARES_NAME+=("$(jq -r ".destination.shares[$i].name" "$CONFIG_FILE")")
+        DEST_SHARES_MOUNT_AS+=("$(jq -r ".destination.shares[$i].mountAs" "$CONFIG_FILE")")
+    done
     
-    # Build associative arrays for directory mapping
-    declare -gA DIR_MAP
-    declare -gA REVERSE_MAP
-    declare -gA SHARE_NAMES_SOURCE
-    declare -gA SHARE_NAMES_DEST
+    # Parse directory mappings (absolute paths)
+    local dir_count
+    dir_count=$(jq '.directories | length' "$CONFIG_FILE")
+    for ((i=0; i<dir_count; i++)); do
+        local src_path dest_path
+        src_path=$(expand_path "$(jq -r ".directories[$i].source" "$CONFIG_FILE")")
+        dest_path=$(expand_path "$(jq -r ".directories[$i].destination" "$CONFIG_FILE")")
+        
+        DIR_SOURCES+=("$src_path")
+        DIR_DESTINATIONS+=("$dest_path")
+        DIR_MAP["$src_path"]="$dest_path"
+        REVERSE_MAP["$dest_path"]="$src_path"
+    done
     
-    while IFS=$'\t' read -r src dest shareSrc shareDest; do
-        DIR_MAP["$src"]="$dest"
-        REVERSE_MAP["$dest"]="$src"
-        SHARE_NAMES_SOURCE["$src"]="$shareSrc"
-        SHARE_NAMES_DEST["$dest"]="$shareDest"
-    done < <(jq -r '.directories[] | [.source, .destination, .shareNameSource, .shareNameDest] | @tsv' "$CONFIG_FILE")
+    # Validate configuration
+    validate_directory_paths
+}
+
+# Validate directory paths to prevent dangerous misconfigurations
+validate_directory_paths() {
+    local errors=0
+    
+    for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+        local src="${DIR_SOURCES[$i]}"
+        local dest="${DIR_DESTINATIONS[$i]}"
+        
+        # Check: source path must not be under destination base mount path
+        # Use trailing slash to ensure proper directory containment check
+        if [[ -n "$DEST_BASE" && "$src" == "$DEST_BASE/"* ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid config: directories[$i].source ('$src') is under destination.baseMountPath ('$DEST_BASE')"
+            ((errors++))
+        fi
+        
+        # Check: destination path must not be under source base mount path
+        if [[ -n "$SOURCE_BASE" && "$dest" == "$SOURCE_BASE/"* ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid config: directories[$i].destination ('$dest') is under source.baseMountPath ('$SOURCE_BASE')"
+            ((errors++))
+        fi
+        
+        # Check: source and destination must not be the same
+        if [[ "$src" == "$dest" ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid config: directories[$i] has identical source and destination ('$src')"
+            ((errors++))
+        fi
+        
+        # Check: destination must not be a parent of source (would cause recursion)
+        if [[ "$src" == "$dest"/* ]]; then
+            echo -e "${RED}[ERROR]${NC} Invalid config: directories[$i].source ('$src') is inside destination ('$dest')"
+            ((errors++))
+        fi
+    done
+    
+    if [ $errors -gt 0 ]; then
+        echo -e "${RED}[ERROR]${NC} Configuration validation failed with $errors error(s)"
+        exit 1
+    fi
 }
 
 # Load config immediately when library is sourced
@@ -167,79 +244,64 @@ log_pass() {
 # Mount Check Functions
 # =============================================================================
 
-# Check if both NAS mounts are accessible
-# Usage: check_mounts
+# Check if NAS shares are mounted
+# Arguments: "source", "destination", or "both" (default)
 check_mounts() {
+    local check_type="${1:-both}"
     local errors=0
 
     log_info "Checking NAS mount points..."
 
-    if [ ! -d "$SOURCE_BASE" ] || [ -z "$(ls -A "$SOURCE_BASE" 2>/dev/null)" ]; then
-        log_error "Source NAS ($SOURCE_NAME) not mounted at $SOURCE_BASE"
-        log_info "Run: $MIGRATE_SCRIPT_DIR/mount-nas.sh --target source"
-        ((errors++))
+    if [[ "$check_type" == "source" || "$check_type" == "both" ]]; then
+        for mount_as in "${SOURCE_SHARES_MOUNT_AS[@]}"; do
+            local mount_point="$SOURCE_BASE/$mount_as"
+            if ! mountpoint -q "$mount_point" 2>/dev/null; then
+                log_error "Source share not mounted: $mount_point"
+                ((errors++))
+            fi
+        done
     fi
 
-    if [ ! -d "$DEST_BASE" ] || [ -z "$(ls -A "$DEST_BASE" 2>/dev/null)" ]; then
-        log_error "Destination NAS ($DEST_NAME) not mounted at $DEST_BASE"
-        log_info "Run: $MIGRATE_SCRIPT_DIR/mount-nas.sh --target destination"
-        ((errors++))
+    if [[ "$check_type" == "destination" || "$check_type" == "both" ]]; then
+        for mount_as in "${DEST_SHARES_MOUNT_AS[@]}"; do
+            local mount_point="$DEST_BASE/$mount_as"
+            if ! mountpoint -q "$mount_point" 2>/dev/null; then
+                log_error "Destination share not mounted: $mount_point"
+                ((errors++))
+            fi
+        done
     fi
 
     if [ $errors -gt 0 ]; then
-        log_error "Please mount the NAS shares before running this script."
+        log_error "Missing $errors mount(s). Run ./mount-nas.sh first."
         return 1
     fi
 
-    log_success "Both NAS mount points are accessible."
+    log_success "All required NAS shares are mounted."
     return 0
 }
 
-# More thorough mount check that looks for subdirectories
-# Used by migrate scripts that need to be more careful
-check_mounts_thorough() {
+# Check if directory paths exist (for migration scripts)
+# This validates that the actual source directories in the config exist
+check_directory_paths() {
     local errors=0
 
-    log_info "Checking NAS mount points..."
+    log_info "Checking directory paths..."
 
-    if ! mountpoint -q "$SOURCE_BASE" 2>/dev/null && [ ! -d "$SOURCE_BASE/${DIR_ORDER[0]}" ]; then
-        # Check if any subdirectory is mounted
-        local source_mounted=false
-        for dir in "${DIR_ORDER[@]}"; do
-            if [ -d "$SOURCE_BASE/$dir" ] && [ "$(ls -A "$SOURCE_BASE/$dir" 2>/dev/null)" ]; then
-                source_mounted=true
-                break
-            fi
-        done
-        if [ "$source_mounted" = false ]; then
-            log_error "Source NAS ($SOURCE_NAME) not mounted at $SOURCE_BASE"
-            log_info "Run: $MIGRATE_SCRIPT_DIR/mount-nas.sh --target source"
+    for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+        local src="${DIR_SOURCES[$i]}"
+        if [ ! -d "$src" ]; then
+            log_error "Source directory does not exist: $src"
             ((errors++))
         fi
-    fi
-
-    if ! mountpoint -q "$DEST_BASE" 2>/dev/null && [ ! -d "$DEST_BASE/${DIR_MAP[${DIR_ORDER[0]}]}" ]; then
-        # Check if any subdirectory is mounted
-        local dest_mounted=false
-        for dir in "${DIR_MAP[@]}"; do
-            if [ -d "$DEST_BASE/$dir" ]; then
-                dest_mounted=true
-                break
-            fi
-        done
-        if [ "$dest_mounted" = false ]; then
-            log_error "Destination NAS ($DEST_NAME) not mounted at $DEST_BASE"
-            log_info "Run: $MIGRATE_SCRIPT_DIR/mount-nas.sh --target destination"
-            ((errors++))
-        fi
-    fi
+    done
 
     if [ $errors -gt 0 ]; then
-        log_error "Please mount the NAS shares before running migration."
+        log_error "Some source directories are missing. Check mounts and config."
         return 1
     fi
 
-    log_success "Both NAS mount points are accessible."
+    log_success "All source directories are accessible."
     return 0
 }
 
@@ -247,50 +309,59 @@ check_mounts_thorough() {
 # Path Mapping Functions
 # =============================================================================
 
-# Map destination path back to source path
-# Uses REVERSE_MAP to translate directory names dynamically
-# Usage: source_path=$(map_dest_to_source "projects/foo")
-map_dest_to_source() {
+# Get destination path for a given source path
+# Handles both exact matches and subpaths
+# Usage: dest_path=$(get_dest_for_source "/var/mnt/old-nas/docs/subdir")
+get_dest_for_source() {
     local path="$1"
-    local dest_dir="${path%%/*}"
-    local rest="${path#*/}"
     
-    # If no slash, the whole path is the directory
-    if [ "$dest_dir" = "$path" ]; then
-        rest=""
+    # Try exact match first
+    if [[ -v DIR_MAP["$path"] ]]; then
+        echo "${DIR_MAP[$path]}"
+        return 0
     fi
     
-    # Look up source directory from reverse map
-    local src_dir="${REVERSE_MAP[$dest_dir]:-$dest_dir}"
+    # Try to find a parent directory match
+    for src in "${DIR_SOURCES[@]}"; do
+        if [[ "$path" == "$src"/* ]]; then
+            local relative="${path#$src/}"
+            echo "${DIR_MAP[$src]}/$relative"
+            return 0
+        fi
+    done
     
-    if [ -n "$rest" ]; then
-        echo "$src_dir/$rest"
-    else
-        echo "$src_dir"
-    fi
+    return 1
 }
 
-# Map source path to destination path
-# Uses DIR_MAP to translate directory names dynamically
-# Usage: dest_path=$(map_source_to_dest "storage/foo")
-map_source_to_dest() {
+# Get source path for a given destination path
+# Handles both exact matches and subpaths
+# Usage: src_path=$(get_source_for_dest "/var/mnt/new-nas/docs/subdir")
+get_source_for_dest() {
     local path="$1"
-    local src_dir="${path%%/*}"
-    local rest="${path#*/}"
     
-    # If no slash, the whole path is the directory
-    if [ "$src_dir" = "$path" ]; then
-        rest=""
+    # Try exact match first
+    if [[ -v REVERSE_MAP["$path"] ]]; then
+        echo "${REVERSE_MAP[$path]}"
+        return 0
     fi
     
-    # Look up destination directory from map
-    local dest_dir="${DIR_MAP[$src_dir]:-$src_dir}"
+    # Try to find a parent directory match
+    for dest in "${DIR_DESTINATIONS[@]}"; do
+        if [[ "$path" == "$dest"/* ]]; then
+            local relative="${path#$dest/}"
+            echo "${REVERSE_MAP[$dest]}/$relative"
+            return 0
+        fi
+    done
     
-    if [ -n "$rest" ]; then
-        echo "$dest_dir/$rest"
-    else
-        echo "$dest_dir"
-    fi
+    return 1
+}
+
+# Get display name for a source path (last component or meaningful name)
+# Usage: name=$(get_dir_display_name "/var/mnt/old-nas/documents")
+get_dir_display_name() {
+    local path="$1"
+    basename "$path"
 }
 
 # =============================================================================
