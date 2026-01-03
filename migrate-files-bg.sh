@@ -94,7 +94,7 @@ start_worker() {
     log_info "Starting migration worker in background..."
     
     # Start worker process in background
-    "$0" --worker "${SELECTED_DIRS[@]}" </dev/null >&/dev/null &
+    "$0" --worker "${SELECTED_INDICES[@]}" </dev/null >&/dev/null &
     local pid=$!
     
     echo "$pid" > "$PID_FILE"
@@ -163,11 +163,13 @@ handle_interrupt() {
 trap handle_interrupt SIGINT SIGTERM
 trap cleanup_on_exit EXIT
 
-# Check if a directory has been completed
+# Check if a directory has been completed (by source path)
 is_completed() {
-    local dir="$1"
+    local src_path="$1"
+    local path_id
+    path_id=$(echo -n "$src_path" | md5sum | cut -d' ' -f1)
     if [ -f "$PROGRESS_FILE" ]; then
-        grep -q "^$dir:completed:" "$PROGRESS_FILE" 2>/dev/null
+        grep -q "^$path_id:completed:" "$PROGRESS_FILE" 2>/dev/null
         return $?
     fi
     return 1
@@ -175,28 +177,32 @@ is_completed() {
 
 # Mark a directory as completed
 mark_completed() {
-    local dir="$1"
+    local src_path="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local path_id
+    path_id=$(echo -n "$src_path" | md5sum | cut -d' ' -f1)
     
     # Remove any existing entry for this directory
     if [ -f "$PROGRESS_FILE" ]; then
-        sed -i "/^$dir:/d" "$PROGRESS_FILE"
+        sed -i "/^$path_id:/d" "$PROGRESS_FILE"
     fi
     
-    echo "$dir:completed:$timestamp" >> "$PROGRESS_FILE"
-    log_success "Marked $dir as completed"
+    echo "$path_id:completed:$timestamp:$src_path" >> "$PROGRESS_FILE"
+    log_success "Marked $(get_dir_display_name "$src_path") as completed"
 }
 
 # Mark a directory as in-progress
 mark_in_progress() {
-    local dir="$1"
+    local src_path="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local path_id
+    path_id=$(echo -n "$src_path" | md5sum | cut -d' ' -f1)
     
     if [ -f "$PROGRESS_FILE" ]; then
-        sed -i "/^$dir:/d" "$PROGRESS_FILE"
+        sed -i "/^$path_id:/d" "$PROGRESS_FILE"
     fi
     
-    echo "$dir:in-progress:$timestamp" >> "$PROGRESS_FILE"
+    echo "$path_id:in-progress:$timestamp:$src_path" >> "$PROGRESS_FILE"
 }
 
 # Show migration status
@@ -221,27 +227,35 @@ show_status() {
         echo "No migration progress recorded yet."
         echo ""
         echo "Directories to migrate:"
-        for dir in "${DIR_ORDER[@]}"; do
-            local dest="${DIR_MAP[$dir]}"
-            echo -e "  ${YELLOW}○${NC} $dir → $dest (not started)"
+        for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+            local src="${DIR_SOURCES[$i]}"
+            local dest="${DIR_DESTINATIONS[$i]}"
+            echo -e "  ${YELLOW}○${NC} [$i] $(get_dir_display_name "$src")"
+            echo -e "       $src → $dest"
         done
     else
         echo "Progress file: $PROGRESS_FILE"
         echo ""
-        for dir in "${DIR_ORDER[@]}"; do
-            local dest="${DIR_MAP[$dir]}"
-            local status=$(grep "^$dir:" "$PROGRESS_FILE" 2>/dev/null | cut -d: -f2)
-            local timestamp=$(grep "^$dir:" "$PROGRESS_FILE" 2>/dev/null | cut -d: -f3-)
+        for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+            local src="${DIR_SOURCES[$i]}"
+            local dest="${DIR_DESTINATIONS[$i]}"
+            local path_id
+            path_id=$(echo -n "$src" | md5sum | cut -d' ' -f1)
+            local status=$(grep "^$path_id:" "$PROGRESS_FILE" 2>/dev/null | cut -d: -f2)
+            local timestamp=$(grep "^$path_id:" "$PROGRESS_FILE" 2>/dev/null | cut -d: -f3)
             
             case "$status" in
                 "completed")
-                    echo -e "  ${GREEN}✓${NC} $dir → $dest (completed: $timestamp)"
+                    echo -e "  ${GREEN}✓${NC} [$i] $(get_dir_display_name "$src") (completed: $timestamp)"
+                    echo -e "       $src → $dest"
                     ;;
                 "in-progress")
-                    echo -e "  ${YELLOW}◐${NC} $dir → $dest (in progress since: $timestamp)"
+                    echo -e "  ${YELLOW}◐${NC} [$i] $(get_dir_display_name "$src") (in progress since: $timestamp)"
+                    echo -e "       $src → $dest"
                     ;;
                 *)
-                    echo -e "  ${RED}○${NC} $dir → $dest (not started)"
+                    echo -e "  ${RED}○${NC} [$i] $(get_dir_display_name "$src") (not started)"
+                    echo -e "       $src → $dest"
                     ;;
             esac
         done
@@ -276,14 +290,16 @@ get_dir_size() {
 
 # Migrate a single directory
 migrate_directory() {
-    local src_name="$1"
-    local dest_name="${DIR_MAP[$src_name]}"
-    local src_path="$SOURCE_BASE/$src_name"
-    local dest_path="$DEST_BASE/$dest_name"
+    local src_path="$1"
+    local dest_path="$2"
+    local display_name
+    display_name=$(get_dir_display_name "$src_path")
     
     echo ""
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info "Migrating: $src_name → $dest_name"
+    log_info "Migrating: $display_name"
+    log_info "  Source: $src_path"
+    log_info "  Dest:   $dest_path"
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
     # Verify source exists
@@ -292,16 +308,9 @@ migrate_directory() {
         return 1
     fi
     
-    # Show size estimate
-    # Performance fix: du -sh is very slow on network mounts.
-    # rsync --info=progress2 handles progress reporting efficiently.
-    # log_info "Calculating source size..."
-    # local src_size=$(get_dir_size "$src_path")
-    # log_info "Source size: $src_size"
-    
     # Mark as in-progress
     if [ "$DRY_RUN" = false ]; then
-        mark_in_progress "$src_name"
+        mark_in_progress "$src_path"
     fi
     
     # Build rsync command
@@ -333,13 +342,13 @@ migrate_directory() {
     # Run rsync with real-time output
     if rsync "${rsync_opts[@]}" "$src_path/" "$dest_path/" 2>&1 | tee -a "$LOG_FILE"; then
         if [ "$DRY_RUN" = false ]; then
-            mark_completed "$src_name"
+            mark_completed "$src_path"
         fi
-        log_success "Completed: $src_name → $dest_name"
+        log_success "Completed: $display_name"
         return 0
     else
         local exit_code=$?
-        log_error "rsync failed for $src_name with exit code $exit_code"
+        log_error "rsync failed for $display_name with exit code $exit_code"
         return $exit_code
     fi
 }
@@ -349,7 +358,7 @@ migrate_directory() {
 # =============================================================================
 
 # Parse command line arguments
-SELECTED_DIRS=()
+declare -a SELECTED_INDICES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -390,13 +399,29 @@ while [[ $# -gt 0 ]]; do
             show_help
             ;;
         *)
-            # Assume it's a directory name
-            if [[ -v "DIR_MAP[$1]" ]]; then
-                SELECTED_DIRS+=("$1")
+            # Assume it's a directory index or name
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                if [ "$1" -lt "${#DIR_SOURCES[@]}" ]; then
+                    SELECTED_INDICES+=("$1")
+                else
+                    log_error "Invalid directory index: $1 (max: $((${#DIR_SOURCES[@]} - 1)))"
+                    exit 1
+                fi
             else
-                log_error "Unknown directory: $1"
-                log_info "Valid directories: ${DIR_ORDER[*]}"
-                exit 1
+                # Try to match by basename
+                local found=false
+                for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+                    if [[ "$(get_dir_display_name "${DIR_SOURCES[$i]}")" == "$1" ]]; then
+                        SELECTED_INDICES+=("$i")
+                        found=true
+                        break
+                    fi
+                done
+                if [ "$found" = false ]; then
+                    log_error "Unknown directory: $1"
+                    echo "Use --status to see available directories"
+                    exit 1
+                fi
             fi
             shift
             ;;
@@ -435,8 +460,10 @@ if [ "$WORKER_MODE" = true ]; then
 fi
 
 # Use all directories if none specified
-if [ ${#SELECTED_DIRS[@]} -eq 0 ]; then
-    SELECTED_DIRS=("${DIR_ORDER[@]}")
+if [ ${#SELECTED_INDICES[@]} -eq 0 ]; then
+    for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+        SELECTED_INDICES+=("$i")
+    done
 fi
 
 # Start migration
@@ -457,27 +484,30 @@ if [ "$RESUME" = true ]; then
     log_info "RESUME MODE - Skipping completed directories"
 fi
 
-# Check mounts
-check_mounts_thorough
+# Check that source directories exist
+check_directory_paths
 
 # Process directories
 completed_count=0
 skipped_count=0
 failed_count=0
 
-for dir in "${SELECTED_DIRS[@]}"; do
+for idx in "${SELECTED_INDICES[@]}"; do
+    local src="${DIR_SOURCES[$idx]}"
+    local dest="${DIR_DESTINATIONS[$idx]}"
+    
     # Skip if resuming and already completed
-    if [ "$RESUME" = true ] && is_completed "$dir"; then
-        log_info "Skipping $dir (already completed)"
+    if [ "$RESUME" = true ] && is_completed "$src"; then
+        log_info "Skipping $(get_dir_display_name "$src") (already completed)"
         ((skipped_count++))
         continue
     fi
     
-    if migrate_directory "$dir"; then
+    if migrate_directory "$src" "$dest"; then
         ((completed_count++))
     else
         ((failed_count++))
-        log_error "Failed to migrate $dir"
+        log_error "Failed to migrate $(get_dir_display_name "$src")"
     fi
 done
 

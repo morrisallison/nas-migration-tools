@@ -2,41 +2,46 @@
   "source": {
     "name": "old-nas",
     "address": "192.168.0.100",
-    "basePath": "/var/mnt/old-nas",
+    "baseMountPath": "/var/mnt/old-nas",
     "credentialsFile": "~/.smbcredentials-old-nas",
-    "mountOptions": "vers=2.0"
+    "mountOptions": "vers=2.0",
+    "shares": [
+      { "name": "Documents", "mountAs": "documents" },
+      { "name": "Photos", "mountAs": "photos" },
+      { "name": "OldName", "mountAs": "old-name" }
+    ]
   },
   "destination": {
     "name": "new-nas",
     "address": "192.168.0.200",
-    "basePath": "/var/mnt/new-nas",
+    "baseMountPath": "/var/mnt/new-nas",
     "credentialsFile": "~/.smbcredentials-new-nas",
     "mountOptions": "",
-    "extraShares": [
-      "isos",
-      "backups"
+    "shares": [
+      { "name": "documents", "mountAs": "documents" },
+      { "name": "photos", "mountAs": "photos" },
+      { "name": "new-name", "mountAs": "new-name" },
+      { "name": "isos", "mountAs": "isos" },
+      { "name": "backups", "mountAs": "backups" }
     ]
   },
-  "logDir": "~/nas-migrate-logs",
-  "progressFile": "~/.nas-migrate-progress",
+  "logDirectory": "~/nas-migrate-logs",
   "directories": [
     {
-      "source": "documents",
-      "destination": "documents",
-      "shareNameSource": "Documents",
-      "shareNameDest": "documents"
+      "source": "/var/mnt/old-nas/documents",
+      "destination": "/var/mnt/new-nas/documents"
     },
     {
-      "source": "photos",
-      "destination": "photos",
-      "shareNameSource": "Photos",
-      "shareNameDest": "photos"
+      "source": "/var/mnt/old-nas/photos",
+      "destination": "/var/mnt/new-nas/photos"
     },
     {
-      "source": "old-name",
-      "destination": "new-name",
-      "shareNameSource": "OldName",
-      "shareNameDest": "new-name"
+      "source": "/var/mnt/old-nas/old-name",
+      "destination": "/var/mnt/new-nas/new-name"
+    },
+    {
+      "source": "/home/user/local-photos",
+      "destination": "/var/mnt/new-nas/photos/local-imports"
     }
   ]
 }

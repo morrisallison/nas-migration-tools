@@ -44,11 +44,45 @@ show_help() {
 }
 
 # Copy files from a single directory
+# The dir_path is expected to be relative to one of the configured destinations
 copy_directory() {
     local dir_path="$1"
-    local src_path
-    src_path="$SOURCE_BASE/$(map_dest_to_source "$dir_path")"
-    local dest_path="$DEST_BASE/$dir_path"
+    
+    # Find which directory mapping this path belongs to
+    local src_path=""
+    local dest_path=""
+    
+    for ((i=0; i<${#DIR_DESTINATIONS[@]}; i++)); do
+        local dest_base="${DIR_DESTINATIONS[$i]}"
+        if [[ "$dir_path" == "$dest_base"* ]] || [[ "$dest_base/$dir_path" == *"$dir_path"* ]]; then
+            # Found the mapping, construct paths
+            local rel_path="${dir_path#$dest_base/}"
+            if [[ "$rel_path" == "$dir_path" ]]; then
+                # dir_path is relative, not absolute
+                dest_path="$dest_base/$dir_path"
+                src_path="${DIR_SOURCES[$i]}/$dir_path"
+            else
+                dest_path="$dir_path"
+                src_path="${DIR_SOURCES[$i]}/$rel_path"
+            fi
+            break
+        fi
+    done
+    
+    # If we couldn't find a mapping, try using the path directly
+    if [ -z "$src_path" ]; then
+        # Check if it's an absolute path
+        if [[ "$dir_path" == /* ]]; then
+            dest_path="$dir_path"
+            src_path=$(get_source_for_dest "$dir_path") || {
+                log_warning "Cannot find source for: $dir_path"
+                return 1
+            }
+        else
+            log_warning "Cannot determine source for: $dir_path"
+            return 1
+        fi
+    fi
 
     # Verify source exists
     if [ ! -d "$src_path" ]; then
@@ -61,7 +95,7 @@ copy_directory() {
         mkdir -p "$dest_path"
     fi
 
-    log_info "Copying: $dir_path"
+    log_info "Copying: $(basename "$dir_path")"
     log_info "  From: $src_path"
     log_info "  To:   $dest_path"
 
@@ -171,8 +205,8 @@ if [ "$DRY_RUN" = true ]; then
     log_warning "DRY RUN MODE - No files will be copied"
 fi
 
-# Check mounts
-check_mounts
+# Check that source directories exist
+check_directory_paths
 
 # Count total directories
 total_dirs=$(wc -l < "$INPUT_FILE")

@@ -99,17 +99,26 @@ compute_hash() {
 }
 
 # Parse the verify log and extract file paths with their source directories
+# Now expects absolute paths in the log (new format)
 extract_files_from_log() {
     local log_file="$1"
-    local current_src_dir=""
-    local current_dest_dir=""
+    local current_src=""
+    local current_dest=""
     
     while IFS= read -r line; do
-        # Check for section header: === rsync differences for src → dest ===
-        # Using grep/sed approach for more reliable parsing
-        if echo "$line" | grep -q "^=== rsync differences for"; then
-            current_src_dir=$(echo "$line" | sed -n 's/^=== rsync differences for \([^ ]*\) → .*/\1/p')
-            current_dest_dir=$(echo "$line" | sed -n 's/^=== rsync differences for [^ ]* → \([^ ]*\) ===/\1/p')
+        # Check for section header: === rsync differences for display_name ===
+        # Now we need to look for the Source: and Dest: lines that follow
+        if echo "$line" | grep -q "Verifying:"; then
+            continue
+        fi
+        
+        if echo "$line" | grep -q "Source:"; then
+            current_src=$(echo "$line" | sed -n 's/.*Source: \(.*\)/\1/p' | xargs)
+            continue
+        fi
+        
+        if echo "$line" | grep -q "Dest:"; then
+            current_dest=$(echo "$line" | sed -n 's/.*Dest: \(.*\)/\1/p' | xargs)
             continue
         fi
         
@@ -121,21 +130,22 @@ extract_files_from_log() {
             local filepath
             filepath=$(echo "$line" | cut -c13-)
             
-            if [ -n "$current_src_dir" ] && [ -n "$filepath" ]; then
-                echo "${current_src_dir}|${current_dest_dir}|${filepath}"
+            if [ -n "$current_src" ] && [ -n "$current_dest" ] && [ -n "$filepath" ]; then
+                echo "${current_src}|${current_dest}|${filepath}"
             fi
         fi
     done < "$log_file"
 }
 
 # Verify a single file by checksum
+# Now expects src_dir and dest_dir to be absolute paths
 verify_file() {
     local src_dir="$1"
     local dest_dir="$2"
     local relative_path="$3"
     
-    local src_file="$SOURCE_BASE/$src_dir/$relative_path"
-    local dest_file="$DEST_BASE/$dest_dir/$relative_path"
+    local src_file="$src_dir/$relative_path"
+    local dest_file="$dest_dir/$relative_path"
     
     ((TOTAL_FILES++)) || true
     
@@ -268,8 +278,8 @@ main() {
         log_info "Mode: Verbose (showing all results)"
     fi
     
-    # Check mounts
-    check_mounts_thorough
+    # Check that source directories exist
+    check_directory_paths
     
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_info "Extracting files from verify log..."

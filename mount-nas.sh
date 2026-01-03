@@ -71,16 +71,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Mount or unmount a single share
-# Arguments: nas_address, base_mount_path, mount_opts, share_name
+# Arguments: nas_address, base_mount_path, mount_opts, share_name, mount_as
 process_share() {
     local nas_address="$1"
     local base_mount_path="$2"
     local mount_opts="$3"
     local share_name="$4"
+    local mount_as="$5"
     
-    local kebab_name
-    kebab_name=$(to_kebab_case "$share_name")
-    local mount_point="$base_mount_path/$kebab_name"
+    local mount_point="$base_mount_path/$mount_as"
 
     if [ "$unmount" = true ]; then
         # Check if already mounted before attempting unmount
@@ -118,7 +117,8 @@ process_share() {
 process_nas() {
     local nas_type="$1"
     local nas_address nas_name base_mount_path creds_file mount_opts_extra
-    local -a share_names=()
+    local -a shares_name=()
+    local -a shares_mount_as=()
     
     if [ "$nas_type" = "source" ]; then
         nas_name="$SOURCE_NAME"
@@ -126,28 +126,22 @@ process_nas() {
         base_mount_path="$SOURCE_BASE"
         creds_file="$SOURCE_CREDS"
         mount_opts_extra="$SOURCE_MOUNT_OPTS"
-        
-        # Build share names from config
-        for dir in "${DIR_ORDER[@]}"; do
-            share_names+=("${SHARE_NAMES_SOURCE[$dir]}")
-        done
+        shares_name=("${SOURCE_SHARES_NAME[@]}")
+        shares_mount_as=("${SOURCE_SHARES_MOUNT_AS[@]}")
     else
         nas_name="$DEST_NAME"
         nas_address="$DEST_ADDRESS"
         base_mount_path="$DEST_BASE"
         creds_file="$DEST_CREDS"
         mount_opts_extra="$DEST_MOUNT_OPTS"
-        
-        # Build share names from config
-        for dir in "${DIR_ORDER[@]}"; do
-            local dest_dir="${DIR_MAP[$dir]}"
-            share_names+=("${SHARE_NAMES_DEST[$dest_dir]}")
-        done
-        
-        # Add extra shares (destination-only directories not part of migration)
-        for share in "${DEST_EXTRA_SHARES[@]}"; do
-            share_names+=("$share")
-        done
+        shares_name=("${DEST_SHARES_NAME[@]}")
+        shares_mount_as=("${DEST_SHARES_MOUNT_AS[@]}")
+    fi
+    
+    # Check if there are any shares to process
+    if [ ${#shares_name[@]} -eq 0 ]; then
+        echo "  No shares configured for $nas_type NAS"
+        return 0
     fi
     
     local action="Mounting"
@@ -179,8 +173,8 @@ process_nas() {
     
     # Process each share
     local errors=0
-    for share_name in "${share_names[@]}"; do
-        if ! process_share "$nas_address" "$base_mount_path" "$mount_opts" "$share_name"; then
+    for ((i=0; i<${#shares_name[@]}; i++)); do
+        if ! process_share "$nas_address" "$base_mount_path" "$mount_opts" "${shares_name[$i]}" "${shares_mount_as[$i]}"; then
             ((errors++))
         fi
     done

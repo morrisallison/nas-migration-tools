@@ -55,10 +55,10 @@ show_help() {
 
 # Show file count and size summary for a directory
 show_summary() {
-    local src_name="$1"
-    local dest_name="${DIR_MAP[$src_name]}"
-    local src_path="$SOURCE_BASE/$src_name"
-    local dest_path="$DEST_BASE/$dest_name"
+    local src_path="$1"
+    local dest_path="$2"
+    local display_name
+    display_name=$(get_dir_display_name "$src_path")
 
     if [ ! -d "$src_path" ]; then
         log_warning "Source directory does not exist: $src_path"
@@ -70,7 +70,7 @@ show_summary() {
         return 1
     fi
 
-    log_info "Comparing: $src_name → $dest_name"
+    log_info "Comparing: $display_name"
 
     # Use ionice for low I/O priority
     local src_count src_size dest_count dest_size
@@ -108,17 +108,17 @@ show_summary() {
 
 # Run rsync dry-run comparison
 run_rsync_verify() {
-    local src_name="$1"
-    local dest_name="${DIR_MAP[$src_name]}"
-    local src_path="$SOURCE_BASE/$src_name"
-    local dest_path="$DEST_BASE/$dest_name"
+    local src_path="$1"
+    local dest_path="$2"
+    local display_name
+    display_name=$(get_dir_display_name "$src_path")
 
     if [ ! -d "$src_path" ]; then
         log_warning "Source directory does not exist: $src_path"
         return 1
     fi
 
-    log_info "rsync verification: $src_name → $dest_name"
+    log_info "rsync verification: $display_name"
 
     local rsync_opts=(
         --archive
@@ -157,7 +157,7 @@ run_rsync_verify() {
         
         # Log all differences to log file
         echo "" >> "$LOG_FILE"
-        echo "=== rsync differences for $src_name → $dest_name ===" >> "$LOG_FILE"
+        echo "=== rsync differences for $display_name ===" >> "$LOG_FILE"
         echo "$output" | grep "^[>c]" >> "$LOG_FILE"
         echo "" >> "$LOG_FILE"
         
@@ -174,17 +174,17 @@ run_rsync_verify() {
 
 # Run random file sampling with cmp
 run_sample_verify() {
-    local src_name="$1"
-    local dest_name="${DIR_MAP[$src_name]}"
-    local src_path="$SOURCE_BASE/$src_name"
-    local dest_path="$DEST_BASE/$dest_name"
+    local src_path="$1"
+    local dest_path="$2"
+    local display_name
+    display_name=$(get_dir_display_name "$dest_path")
 
     if [ ! -d "$dest_path" ]; then
         log_warning "Destination directory does not exist: $dest_path"
         return 1
     fi
 
-    log_info "Random sampling: $dest_name ($SAMPLE_COUNT files)"
+    log_info "Random sampling: $display_name ($SAMPLE_COUNT files)"
 
     if [ "$DRY_RUN" = true ]; then
         log_info "  [DRY RUN] Would sample $SAMPLE_COUNT random files from $dest_path"
@@ -210,11 +210,9 @@ run_sample_verify() {
         [ -z "$dest_file" ] && continue
         ((total++)) || true
 
-        # Map destination path to source path
-        local rel_path="${dest_file#$DEST_BASE/}"
-        local src_rel_path
-        src_rel_path=$(map_dest_to_source "$rel_path")
-        local src_file="$SOURCE_BASE/$src_rel_path"
+        # Map destination file to source file
+        local rel_path="${dest_file#$dest_path/}"
+        local src_file="$src_path/$rel_path"
 
         if [ ! -f "$src_file" ]; then
             ((missing++)) || true
@@ -242,7 +240,7 @@ run_sample_verify() {
     if [ ${#mismatch_list[@]} -gt 0 ]; then
         # Log all to file
         echo "" >> "$LOG_FILE"
-        echo "=== Sample mismatches for $dest_name ===" >> "$LOG_FILE"
+        echo "=== Sample mismatches for $display_name ===" >> "$LOG_FILE"
         for item in "${mismatch_list[@]}"; do
             echo "  $item" >> "$LOG_FILE"
         done
@@ -265,31 +263,35 @@ run_sample_verify() {
 
 # Verify a single directory
 verify_directory() {
-    local src_name="$1"
-    local dest_name="${DIR_MAP[$src_name]}"
+    local src_path="$1"
+    local dest_path="$2"
+    local display_name
+    display_name=$(get_dir_display_name "$src_path")
 
     echo ""
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info "Verifying: $src_name → $dest_name"
+    log_info "Verifying: $display_name"
+    log_info "  Source: $src_path"
+    log_info "  Dest:   $dest_path"
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local has_errors=false
 
     # Summary comparison
-    if ! show_summary "$src_name"; then
+    if ! show_summary "$src_path" "$dest_path"; then
         has_errors=true
     fi
 
     # rsync verification
     if [ "$SUMMARY_ONLY" = false ] && [ "$SAMPLE_ONLY" = false ]; then
-        if ! run_rsync_verify "$src_name"; then
+        if ! run_rsync_verify "$src_path" "$dest_path"; then
             has_errors=true
         fi
     fi
 
     # Random sampling
     if [ "$SUMMARY_ONLY" = false ] && [ "$RSYNC_ONLY" = false ]; then
-        if ! run_sample_verify "$src_name"; then
+        if ! run_sample_verify "$src_path" "$dest_path"; then
             has_errors=true
         fi
     fi
@@ -305,7 +307,7 @@ verify_directory() {
 # =============================================================================
 
 # Parse command line arguments
-SELECTED_DIRS=()
+declare -a SELECTED_INDICES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -341,13 +343,29 @@ while [[ $# -gt 0 ]]; do
             show_help
             ;;
         *)
-            # Assume it's a directory name
-            if [[ -v "DIR_MAP[$1]" ]]; then
-                SELECTED_DIRS+=("$1")
+            # Assume it's a directory index or name
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                if [ "$1" -lt "${#DIR_SOURCES[@]}" ]; then
+                    SELECTED_INDICES+=("$1")
+                else
+                    log_error "Invalid directory index: $1 (max: $((${#DIR_SOURCES[@]} - 1)))"
+                    exit 1
+                fi
             else
-                log_error "Unknown directory: $1"
-                log_info "Valid directories: ${DIR_ORDER[*]}"
-                exit 1
+                # Try to match by basename
+                local found=false
+                for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+                    if [[ "$(get_dir_display_name "${DIR_SOURCES[$i]}")" == "$1" ]]; then
+                        SELECTED_INDICES+=("$i")
+                        found=true
+                        break
+                    fi
+                done
+                if [ "$found" = false ]; then
+                    log_error "Unknown directory: $1"
+                    echo "Use migrate-files.sh --status to see available directories"
+                    exit 1
+                fi
             fi
             shift
             ;;
@@ -358,8 +376,10 @@ done
 mkdir -p "$LOG_DIR"
 
 # Use all directories if none specified
-if [ ${#SELECTED_DIRS[@]} -eq 0 ]; then
-    SELECTED_DIRS=("${DIR_ORDER[@]}")
+if [ ${#SELECTED_INDICES[@]} -eq 0 ]; then
+    for ((i=0; i<${#DIR_SOURCES[@]}; i++)); do
+        SELECTED_INDICES+=("$i")
+    done
 fi
 
 # Start verification
@@ -370,7 +390,7 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 
 log_info "Log file: $LOG_FILE"
-log_info "Directories to verify: ${SELECTED_DIRS[*]}"
+log_info "Directories to verify: ${#SELECTED_INDICES[@]}"
 log_info "Sample count: $SAMPLE_COUNT"
 [ -n "$BWLIMIT" ] && log_info "Bandwidth limit: ${BWLIMIT} KB/s"
 
@@ -388,15 +408,18 @@ else
     log_info "Mode: Full verification (rsync + sampling)"
 fi
 
-# Check mounts
-check_mounts_thorough
+# Check that source directories exist
+check_directory_paths
 
 # Process directories
 passed_count=0
 failed_count=0
 
-for dir in "${SELECTED_DIRS[@]}"; do
-    if verify_directory "$dir"; then
+for idx in "${SELECTED_INDICES[@]}"; do
+    local src="${DIR_SOURCES[$idx]}"
+    local dest="${DIR_DESTINATIONS[$idx]}"
+    
+    if verify_directory "$src" "$dest"; then
         ((passed_count++)) || true
     else
         ((failed_count++)) || true
